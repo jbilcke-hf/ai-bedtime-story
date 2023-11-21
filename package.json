@@ -51,6 +51,7 @@
     "react-virtualized-auto-sizer": "^1.0.20",
     "replicate": "^0.17.0",
     "sbd": "^1.0.19",
+    "sentence-splitter": "^4.3.0",
     "sharp": "^0.32.5",
     "styled-components": "^6.0.7",
     "tailwind-merge": "^1.13.2",

@@ -3,21 +3,19 @@
 import { useEffect, useRef, useState, useTransition } from "react"
 import { useSpring, animated } from "@react-spring/web"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
+import { split } from "sentence-splitter"
 
 import { useToast } from "@/components/ui/use-toast"
 import { cn } from "@/lib/utils"
 import { headingFont } from "@/app/interface/fonts"
 import { useCharacterLimit } from "@/lib/useCharacterLimit"
-import { generateStory } from "@/app/server/actions/generateStory"
-import { getLatestPosts, getPost, postToCommunity } from "@/app/server/actions/community"
-import { HotshotImageInferenceSize, Post, SDXLModel, Story, TTSVoice } from "@/types"
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { generateStoryLines } from "@/app/server/actions/generateStoryLines"
+import { Story, StoryLine, TTSVoice } from "@/types"
 import { TooltipProvider } from "@radix-ui/react-tooltip"
-
 import { useCountdown } from "@/lib/useCountdown"
+import { useAudio } from "@/lib/useAudio"
 
 import { Countdown } from "../countdown"
-import { useAudio } from "@/lib/useAudio"
 
 type Stage = "generate" | "finished"
 
@@ -38,32 +36,54 @@ export function Generate() {
   const [runs, setRuns] = useState(0)
   const runsRef = useRef(0)
 
-  const [story, setStory] = useState<Story>({ text: "", audio: "" })
-  const storyText = story?.text || ""
-  const audioData = story?.audio || ""
+  const currentLineIndexRef = useRef(0)
+  const [currentLineIndex, setCurrentLineIndex] = useState(0)
+
+  useEffect(() => {
+    currentLineIndexRef.current = currentLineIndex
+  }, [currentLineIndex])
+  
+  const [storyLines, setStoryLines] = useState<StoryLine[]>([])
+
+  // computing those is cheap
+  const wholeStory = storyLines.map(line => line.text).join("\n")
+  const currentLine = storyLines.at(currentLineIndex)
+  const currentLineText = currentLine?.text || ""
+  const currentLineAudio = currentLine?.audio || ""
+
+  // reset the whole player when story changes
+  useEffect(() => {
+    setCurrentLineIndex(0)
+  }, [wholeStory])
 
   const [stage, setStage] = useState<Stage>("generate")
   
   const { toast } = useToast()
 
+  const audio = useAudio()
+
+  /*
+  // to simulate a "typing" effect
+  however.. we don't need this as we already have an audio player!
+
   const [typedStoryText, setTypedStoryText] = useState("")
   const [typedStoryCharacterIndex, setTypedStoryCharacterIndex] = useState(0)
-
-  const audio = useAudio()
 
   useEffect(() => {
     if (storyText && typedStoryCharacterIndex < storyText.length) {
       setTimeout(() => {
         setTypedStoryText(typedStoryText + story.text[typedStoryCharacterIndex])
         setTypedStoryCharacterIndex(typedStoryCharacterIndex + 1)
+        console.log("boom")
       }, 40)
     }
   }, [storyText, typedStoryCharacterIndex])
+  */
   
   const { progressPercent, remainingTimeInSec } = useCountdown({
     isActive: isLocked,
     timerId: runs, // everytime we change this, the timer will reset
-    durationInSec: /*stage === "interpolate" ? 30 :*/ 25, // it usually takes 40 seconds, but there might be lag
+    durationInSec: /*stage === "interpolate" ? 30 :*/ 35, // it usually takes 40 seconds, but there might be lag
     onEnd: () => {}
   })
   
@@ -108,28 +128,17 @@ export function Generate() {
       const search = current.toString()
       router.push(`${pathname}${search ? `?${search}` : ""}`)
 
-      let story: Story = {
-        text: "",
-        audio: ""
-      }
-
       const voice: TTSVoice = "Cloée"
       
       setRuns(runsRef.current + 1)
 
       try {
         // console.log("starting transition, calling generateAnimation")
-        story = await generateStory(promptDraft, voice)
+        const newStoryLines = await generateStoryLines(promptDraft, voice)
 
-        console.log("generated story:", story)
+        console.log(`generated ${newStoryLines.length} story lines`)
 
-        if (!story) {
-          throw new Error("invalid story")
-        }
-
-        (window as any)["debugJuju"] = story
-
-        setStory(story)
+        setStoryLines(newStoryLines)
 
       } catch (err) {
 
@@ -171,21 +180,28 @@ export function Generate() {
 
 
   useEffect(() => {
-    if (!audioData) {
-      return
-    }
-    console.log("story audio changed!", audioData)
+    const fn = async () => {
+      if (!currentLineAudio) {
+        return
+      }
+      console.log("story audio changed!")
 
-    try {
-      audio(audioData) // play
-    } catch (err) {
-      console.error(err)
+      try {
+        console.log("playing audio!")
+        await audio(currentLineAudio) // play
+        console.log("audio has ended, I think? let's go next!")
+        setCurrentLineIndex(currentLineIndexRef.current += 1)
+        // TODO change the line
+      } catch (err) {
+        console.error(err)
+      }
     }
+    fn()
 
     return () => {
       audio() // stop
     }
-  }, [audioData])
+  }, [currentLineAudio])
 
   return (
     <div
@@ -212,9 +228,10 @@ export function Generate() {
         <div
           className={cn(
             `flex flex-col`,
-            `flex-grow rounded-2xl md:rounded-3xl`,
-            `backdrop-blur-md bg-gray-800/30`,
-            `border-2 border-white/10`,
+            `flex-grow`,
+            // `rounded-2xl md:rounded-3xl`,
+            // `backdrop-blur-md bg-gray-800/30`,
+            // `border-2 border-white/10`,
             `items-center`,
             `space-y-6 md:space-y-8 lg:space-y-12 xl:space-y-14`,
             `px-3 py-6 md:px-6 md:py-12 xl:px-8 xl:py-14`,
@@ -252,14 +269,14 @@ export function Generate() {
                     `w-full`,
                     `input input-bordered rounded-full`,
                     `transition-all duration-300 ease-in-out`,
+                     `backdrop-blur-md `,
                     `placeholder:text-gray-400`,
                     `disabled:bg-gray-500 disabled:text-yellow-300 disabled:border-transparent`,
                     isLocked
-                      ? `bg-gray-600 text-yellow-300 border-transparent`
-                      : `bg-white/10 text-yellow-400 selection:bg-yellow-200`,
+                      ? `bg-white/10 text-yellow-400/60 selection:bg-yellow-200/60  selection:text-yellow-200/60 border-transparent`
+                      : `bg-white/10 text-yellow-400/100 selection:bg-yellow-200/100 selection:text-yellow-200/100`,
                     `text-left`,
-                    `text-xl leading-10 px-6 h-16 pt-1`,
-                    `selection:bg-yellow-200 selection:text-yellow-200`
+                    `text-2xl leading-10 px-6 h-16 pt-1`,
                   )}
                   value={promptDraft}
                   onChange={e => setPromptDraft(e.target.value)}
@@ -276,7 +293,7 @@ export function Generate() {
                   `flex flew-row ml-[-64px] items-center`,
                   `transition-all duration-300 ease-in-out`,
                   `text-base`,
-                  `bg-yellow-200`,
+                  // `bg-yellow-200`,
                   `rounded-full`,
                   `text-right`,
                   `p-1`,
@@ -289,7 +306,7 @@ export function Generate() {
                   <span>{nbCharsLimits}</span>
                 </div>
               </div>
-              <div className="flex flex-row w-52">
+              <div className="flex flex-row w-44">
                 <animated.button
                   style={{
                     textShadow: "0px 0px 1px #000000ab",
@@ -298,15 +315,16 @@ export function Generate() {
                   onMouseEnter={() => setOverSubmitButton(true)}
                   onMouseLeave={() => setOverSubmitButton(false)}
                   className={cn(
-                    `px-6 py-3`,
+                    `px-4 h-16`,
                     `rounded-full`,
                     `transition-all duration-300 ease-in-out`,
+                    `backdrop-blur-sm`,
                     isLocked
-                      ? `bg-orange-500/20  border-orange-800/10`
-                      : `bg-yellow-500/80 hover:bg-yellow-400/100  border-yellow-800/20`,
+                      ? `bg-orange-200/50 text-sky-50/80 border-yellow-600/10`
+                      : `bg-yellow-400/70 text-sky-50  border-yellow-800/20 hover:bg-yellow-400/80`,
                     `text-center`,
                     `w-full`,
-                    `text-2xl text-sky-50`,
+                    `text-2xl `,
                     `border`,
                     headingFont.className,
                     // `transition-all duration-300`,
@@ -342,7 +360,9 @@ export function Generate() {
             `items-center`,
             `space-y-6 md:space-y-8 lg:space-y-12 xl:space-y-14`,
             `px-3 py-6 md:px-6 md:py-12 xl:px-8 xl:py-14`,
-            story.text ? 'scale-1' : 'scale-0'
+             storyLines.length
+               ? 'scale-100'
+               : 'scale-0'
           )}>
             {assetUrl ? <div
               className={cn(
@@ -366,16 +386,23 @@ export function Generate() {
               `items-center justify-between`
             )}>
               <div className={cn(
-                `flex flex-row flex-grow w-full`
+                `flex flex-col flex-grow w-full space-y-2 text-2xl text-blue-200/90`
               )}>
-              <p>{storyText}</p>
+                {storyLines.map((line, i) =>
+                  <div
+                    key={`${line.text}_${i}`}
+
+                    // TODO change a color if we have progressed at the current index (i)
+                    className={cn()}
+                    >{
+                      line.text
+                    }</div>)}
               </div>
             </div>
           </div>
 
         </div>
 
-      
       </TooltipProvider>
     </div>
   )

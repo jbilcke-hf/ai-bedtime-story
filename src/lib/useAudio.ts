@@ -1,54 +1,80 @@
-import { useCallback, useEffect, useRef } from "react"
+import { useCallback, useEffect, useRef } from 'react';
 
-/**
- * Custom React hook to play a Base64 WAV file.
- */
 export function useAudio() {
-  // Reference to keep track of the current Audio object
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
 
-  // This cleanup function will stop the audio and clean up the audio element
-  const stopAndCleanupAudio = useCallback(() => {
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.src = ''; // Release the object URL to avoid memory leaks
-      audioRef.current = null;
-    }
+  const stopAudio = useCallback(() => {
+    audioContextRef.current?.close();
+    audioContextRef.current = null;
   }, []);
 
-  // Function to load and play the audio, or stop it if called without parameters
-  const playAudio = useCallback(
-    (base64Data?: string) => {
-      const base64str = `${base64Data || ""}`
-      if (base64str) {
-        const base64wav = base64str.startsWith("data:audio/wav")
-          ? base64str
-          : `data:audio/wav;base64,${base64str}`
-      
-        // Clean up any existing audio first
-        stopAndCleanupAudio();
+  // Helper function to handle conversion from Base64 to an ArrayBuffer
+  async function base64ToArrayBuffer(base64: string): Promise<ArrayBuffer> {
+    const response = await fetch(base64);
+    return response.arrayBuffer();
+  }
 
-        // Create a new Audio object and start playing
-        audioRef.current = new Audio(base64wav);
-        audioRef.current.play().catch((e) => {
-          console.error('Failed to play the audio:', e);
-        });
-      } else {
-        // If no base64 data provided, stop the audio
-        stopAndCleanupAudio();
+  const playAudio = useCallback(
+    async (base64Data?: string) => {
+      stopAudio(); // Stop any playing audio first
+
+      // If no base64 data provided, we don't attempt to play any audio
+      if (!base64Data) {
+        return;
       }
+
+      // Initialize AudioContext
+      const audioContext = new AudioContext();
+      audioContextRef.current = audioContext;
+
+      // Format Base64 string if necessary and get ArrayBuffer
+      const formattedBase64 =
+        base64Data.startsWith('data:audio/wav') || base64Data.startsWith('data:audio/wav;base64,')
+          ? base64Data
+          : `data:audio/wav;base64,${base64Data}`;
+
+      console.log(`formattedBase64: ${formattedBase64.slice(0, 50)} (len: ${formattedBase64.length})`);
+
+      const arrayBuffer = await base64ToArrayBuffer(formattedBase64);
+
+      return new Promise((resolve, reject) => {
+        // Decode the audio data and play
+        audioContext.decodeAudioData(arrayBuffer, (audioBuffer) => {
+          // Create a source node and gain node
+          const source = audioContext.createBufferSource();
+          const gainNode = audioContext.createGain();
+          
+          // Set buffer and gain
+          source.buffer = audioBuffer;
+          gainNode.gain.value = 1.0; 
+
+          // Connect nodes
+          source.connect(gainNode);
+          gainNode.connect(audioContext.destination);
+
+          // Start playback and handle finishing
+          source.start();
+          
+          source.onended = () => {
+            stopAudio();
+            resolve(true);
+          };
+        }, (error) => {
+          console.error('Error decoding audio data:', error);
+          reject(error);
+        });
+      })
     },
-    [stopAndCleanupAudio]
+    [stopAudio]
   );
 
   // Effect to handle cleanup on component unmount
   useEffect(() => {
     return () => {
-      stopAndCleanupAudio();
+      stopAudio();
     };
-  }, [stopAndCleanupAudio]);
+  }, [stopAudio]);
 
   // Return the playAudio function from the hook
   return playAudio;
 }
-

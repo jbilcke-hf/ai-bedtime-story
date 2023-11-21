@@ -197,7 +197,11 @@ export type QualityOption = {
   label: string
 }
 
-export type Story = {
+export type StoryLine = {
   text: string
   audio: string // in base64
+}
+
+export type Story = {
+  lines: StoryLine[]
 }

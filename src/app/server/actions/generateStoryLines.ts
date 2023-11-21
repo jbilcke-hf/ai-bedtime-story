@@ -1,11 +1,11 @@
 "use server"
 
-import { Story, TTSVoice } from "@/types"
+import { Story, StoryLine, TTSVoice } from "@/types"
 
 const instance = `${process.env.AI_BEDTIME_STORY_API_GRADIO_URL || ""}`
 const secretToken = `${process.env.AI_BEDTIME_STORY_API_SECRET_TOKEN || ""}`
 
-export async function generateStory(prompt: string, voice: TTSVoice): Promise<Story> {
+export async function generateStoryLines(prompt: string, voice: TTSVoice): Promise<StoryLine[]> {
   if (!prompt?.length) {
     throw new Error(`prompt is too short!`)
   }
@@ -34,22 +34,18 @@ export async function generateStory(prompt: string, voice: TTSVoice): Promise<St
     // next: { revalidate: 1 }
   })
 
-  console.log("res:", res)
+
   const rawJson = await res.json()
-  console.log("rawJson:", rawJson)
-  const data = rawJson.data as Story[]
-  console.log("data:", data)
+  const data = rawJson.data as StoryLine[][]
 
-  const story = data?.[0] || { text: "", audio: "" }
+  const stories = data?.[0] || []
 
-  // console.log("story:", story)
-
-  // Recommendation: handle errors
-  if (res.status !== 200 || !story?.text || !story?.audio) {
-
-    // This will activate the closest `error.js` Error Boundary
+  if (res.status !== 200) {
     throw new Error('Failed to fetch data')
   }
 
-  return story
+  return stories.map(line => ({
+    text: line.text.replaceAll(" .", ".").replaceAll(" ?", "?").replaceAll(" !", "!").trim(),
+    audio: line.audio
+  }))
 }

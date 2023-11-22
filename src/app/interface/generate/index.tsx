@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useTransition } from "react"
 import { useSpring, animated } from "@react-spring/web"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
+import useSmoothScroll from "react-smooth-scroll-hook"
 import { split } from "sentence-splitter"
 
 import { useToast } from "@/components/ui/use-toast"
@@ -16,6 +17,7 @@ import { useCountdown } from "@/lib/useCountdown"
 import { useAudio } from "@/lib/useAudio"
 
 import { Countdown } from "../countdown"
+import { generateImage } from "@/app/server/actions/generateImage"
 
 type Stage = "generate" | "finished"
 
@@ -32,6 +34,7 @@ export function Generate() {
   const [promptDraft, setPromptDraft] = useState("")
   const [assetUrl, setAssetUrl] = useState("")
   const [isOverSubmitButton, setOverSubmitButton] = useState(false)
+  const [isOverPauseButton, setOverPauseButton] = useState(false)
 
   const [runs, setRuns] = useState(0)
   const runsRef = useRef(0)
@@ -39,13 +42,30 @@ export function Generate() {
   const currentLineIndexRef = useRef(0)
   const [currentLineIndex, setCurrentLineIndex] = useState(0)
 
+  const voices: TTSVoice[] = ["Cloée", "Julian"]
+  const [voice, setVoice] = useState<TTSVoice>("Cloée")
+
+  const { scrollTo } = useSmoothScroll({
+    ref: scrollRef,
+    speed: 2000,
+    direction: 'y',
+  });
+
   useEffect(() => {
     currentLineIndexRef.current = currentLineIndex
   }, [currentLineIndex])
-  
+
   const [storyLines, setStoryLines] = useState<StoryLine[]>([])
 
+  const [images, setImages] = useState<string[]>([])
+  const imagesRef = useRef<string[]>([])
+  const imageListKey = images.join("")
+  useEffect(() => {
+    imagesRef.current = images
+  }, [imageListKey])
+
   // computing those is cheap
+
   const wholeStory = storyLines.map(line => line.text).join("\n")
   const currentLine = storyLines.at(currentLineIndex)
   const currentLineText = currentLine?.text || ""
@@ -60,30 +80,12 @@ export function Generate() {
   
   const { toast } = useToast()
 
-  const audio = useAudio()
+  const { playback, isPlaying, isSwitchingTracks, isLoaded, progress, togglePause } = useAudio()
 
-  /*
-  // to simulate a "typing" effect
-  however.. we don't need this as we already have an audio player!
-
-  const [typedStoryText, setTypedStoryText] = useState("")
-  const [typedStoryCharacterIndex, setTypedStoryCharacterIndex] = useState(0)
-
-  useEffect(() => {
-    if (storyText && typedStoryCharacterIndex < storyText.length) {
-      setTimeout(() => {
-        setTypedStoryText(typedStoryText + story.text[typedStoryCharacterIndex])
-        setTypedStoryCharacterIndex(typedStoryCharacterIndex + 1)
-        console.log("boom")
-      }, 40)
-    }
-  }, [storyText, typedStoryCharacterIndex])
-  */
-  
   const { progressPercent, remainingTimeInSec } = useCountdown({
     isActive: isLocked,
     timerId: runs, // everytime we change this, the timer will reset
-    durationInSec: /*stage === "interpolate" ? 30 :*/ 35, // it usually takes 40 seconds, but there might be lag
+    durationInSec: /*stage === "interpolate" ? 30 :*/ 50, // it usually takes 40 seconds, but there might be lag
     onEnd: () => {}
   })
   
@@ -98,6 +100,20 @@ export function Generate() {
       ? 'scale(1.05)'
       : 'scale(1.0)',
     boxShadow: isOverSubmitButton 
+      ? `0px 5px 15px 0px rgba(0, 0, 0, 0.05)`
+      : `0px 0px 0px 0px rgba(0, 0, 0, 0.05)`,
+    loop: true,
+    config: {
+      tension: 300,
+      friction: 10,
+    },
+  })
+
+  const pauseButtonBouncer = useSpring({
+    transform: isOverPauseButton
+      ? 'scale(1.05)'
+      : 'scale(1.0)',
+    boxShadow: isOverPauseButton 
       ? `0px 5px 15px 0px rgba(0, 0, 0, 0.05)`
       : `0px 0px 0px 0px rgba(0, 0, 0, 0.05)`,
     loop: true,
@@ -187,11 +203,47 @@ export function Generate() {
       console.log("story audio changed!")
 
       try {
-        console.log("playing audio!")
-        await audio(currentLineAudio) // play
-        console.log("audio has ended, I think? let's go next!")
-        setCurrentLineIndex(currentLineIndexRef.current += 1)
-        // TODO change the line
+        const isLastLine =
+          (storyLines.length === 0) ||
+          (currentLineIndexRef.current === (storyLines.length - 1))
+
+        scrollTo(`#story-line-${currentLineIndexRef.current}`)
+
+        const nextLineIndex = (currentLineIndexRef.current += 1)
+        const nextLineText = storyLines[nextLineIndex]?.text || ""
+
+        if (nextLineText) {
+          setTimeout(() => {
+            startTransition(async () => {
+              try {
+                const newImage = await generateImage({
+                  positivePrompt: [
+                    "bedtime story illustration",
+                    "painting illustration",
+                    promptDraft,
+                    nextLineText,
+                  ].join(", "),
+                  width: 1024,
+                  height: 800
+                })
+                // console.log("newImage:", newImage.slice(0, 50))
+                setImages(imagesRef.current.concat(newImage))
+              } catch (err) {
+                setImages(imagesRef.current.concat(""))
+              }
+            })
+          }, 100)
+        } else {
+          setImages(imagesRef.current.concat(""))
+        }
+
+        await playback(currentLineAudio, isLastLine) // play
+        
+        if (!isLastLine && nextLineText) {
+          setTimeout(() => {
+            setCurrentLineIndex(nextLineIndex)
+          }, 1000)
+        }
       } catch (err) {
         console.error(err)
       }
@@ -199,9 +251,9 @@ export function Generate() {
     fn()
 
     return () => {
-      audio() // stop
+      playback() // stop
     }
-  }, [currentLineAudio])
+  }, [currentLineText, currentLineAudio])
 
   return (
     <div
@@ -254,7 +306,7 @@ export function Generate() {
 
             <div className={cn(
               `flex flex-col md:flex-row`,
-              `space-y-3 md:space-y-0 md:space-x-3`,
+              `space-y-4 md:space-y-0 md:space-x-4`,
               ` w-full md:max-w-[1024px]`,
               `items-center justify-between`
             )}>
@@ -270,13 +322,16 @@ export function Generate() {
                     `input input-bordered rounded-full`,
                     `transition-all duration-300 ease-in-out`,
                      `backdrop-blur-md `,
-                    `placeholder:text-gray-400`,
-                    `disabled:bg-gray-500 disabled:text-yellow-300 disabled:border-transparent`,
+                    `placeholder:text-gray-400/90`,
+                    `disabled:bg-blue-900/70 disabled:text-blue-300/60 disabled:border-transparent`,
                     isLocked
-                      ? `bg-white/10 text-yellow-400/60 selection:bg-yellow-200/60  selection:text-yellow-200/60 border-transparent`
+                      ? `bg-blue-100/80 text-yellow-400/60 selection:bg-yellow-200/60  selection:text-yellow-200/60 border-transparent`
                       : `bg-white/10 text-yellow-400/100 selection:bg-yellow-200/100 selection:text-yellow-200/100`,
                     `text-left`,
-                    `text-2xl leading-10 px-6 h-16 pt-1`,
+                    ``,
+                    storyLines?.length
+                    ? `text-2xl leading-10 px-6 h-16 pt-1`
+                    : `text-3xl leading-14 px-8 h-[70px] pt-1`
                   )}
                   value={promptDraft}
                   onChange={e => setPromptDraft(e.target.value)}
@@ -306,39 +361,82 @@ export function Generate() {
                   <span>{nbCharsLimits}</span>
                 </div>
               </div>
-              <div className="flex flex-row w-44">
-                <animated.button
-                  style={{
-                    textShadow: "0px 0px 1px #000000ab",
-                    ...submitButtonBouncer
-                  }}
-                  onMouseEnter={() => setOverSubmitButton(true)}
-                  onMouseLeave={() => setOverSubmitButton(false)}
-                  className={cn(
-                    `px-4 h-16`,
-                    `rounded-full`,
-                    `transition-all duration-300 ease-in-out`,
-                    `backdrop-blur-sm`,
-                    isLocked
-                      ? `bg-orange-200/50 text-sky-50/80 border-yellow-600/10`
-                      : `bg-yellow-400/70 text-sky-50  border-yellow-800/20 hover:bg-yellow-400/80`,
-                    `text-center`,
-                    `w-full`,
-                    `text-2xl `,
-                    `border`,
-                    headingFont.className,
-                    // `transition-all duration-300`,
-                    // `hover:animate-bounce`
-                  )}
-                  disabled={isLocked}
-                  onClick={handleSubmit}
-                  >
-                  {isLocked
-                    ? `Dreaming..`
-                    : "Dream"
-                  }
-                </animated.button>
-              </div>
+              <div className="flex flex-row w-full md:w-auto justify-center">
+                <div className="flex flex-row w-1/2 md:w-52">
+                  <animated.button
+                    style={{
+                      textShadow: "0px 0px 1px #000000ab",
+                      ...submitButtonBouncer
+                    }}
+                    onMouseEnter={() => setOverSubmitButton(true)}
+                    onMouseLeave={() => setOverSubmitButton(false)}
+                    className={cn(
+                      storyLines?.length
+                      ? `text-2xl leading-10 px-4 h-16`
+                      : `text-3xl leading-14 px-6 h-[70px]`,
+                      `rounded-full`,
+                      `transition-all duration-300 ease-in-out`,
+                      `backdrop-blur-sm`,
+                      isLocked
+                        ? `bg-blue-900/70 text-sky-50/80 border-yellow-600/10`
+                        : `bg-yellow-400/70 text-sky-50  border-yellow-800/20 hover:bg-yellow-400/80`,
+                      `text-center`,
+                      `w-full`,
+                      `border`,
+                      headingFont.className,
+                      // `transition-all duration-300`,
+                      // `hover:animate-bounce`
+                    )}
+                    disabled={isLocked}
+                    onClick={handleSubmit}
+                    >
+                    {isLocked
+                      ? `Dreaming..`
+                      : "Dream 🌙"
+                    }
+                  </animated.button>
+                </div>
+                {
+                  /*
+                !!storyLines.length && <div className={cn(
+                  `flex flex-row w-1/2 md:w-44`,
+                  `transition-all duration-300 ease-in-out`,
+                    isLoaded ? 'scale-100' : 'scale-0'
+                  )}>
+                    <animated.button
+                      style={{
+                        textShadow: "0px 0px 1px #000000ab",
+                        ...pauseButtonBouncer
+                      }}
+                      onMouseEnter={() => setOverPauseButton(true)}
+                      onMouseLeave={() => setOverPauseButton(false)}
+                      className={cn(
+                        `px-4 h-16`,
+                        `rounded-full`,
+                        `transition-all duration-300 ease-in-out`,
+                        `backdrop-blur-sm`,
+                        isLocked
+                          ? `bg-orange-200/30 text-sky-50/60 border-yellow-600/10`
+                          : `bg-yellow-400/50 text-sky-50  border-yellow-800/20 hover:bg-yellow-400/60`,
+                        `text-center`,
+                        `w-full`,
+                        `text-2xl `,
+                        `border`,
+                        headingFont.className,
+                        // `transition-all duration-300`,
+                        // `hover:animate-bounce`
+                      )}
+                      disabled={isLocked}
+                      onClick={togglePause}
+                      >
+                      {isPlaying || isSwitchingTracks
+                        ? "Pause 🔊"
+                        : "Play 🔊"
+                      }
+                    </animated.button>
+                  </div>
+                */
+                }</div>
             </div>
           </div>
 
@@ -350,6 +448,7 @@ export function Generate() {
         `space-y-8`,
        //  `transition-all duration-300 ease-in-out`,
       )}>
+        
       
         <div
           className={cn(
@@ -379,6 +478,7 @@ export function Generate() {
                 />}
             </div> : null}
 
+
             <div className={cn(
               `flex flex-col md:flex-row`,
               `space-y-3 md:space-y-0 md:space-x-3`,
@@ -386,17 +486,41 @@ export function Generate() {
               `items-center justify-between`
             )}>
               <div className={cn(
-                `flex flex-col flex-grow w-full space-y-2 text-2xl text-blue-200/90`
+                `flex flex-col flex-grow w-full items-center space-y-2 text-2xl text-blue-200/60`
               )}>
                 {storyLines.map((line, i) =>
                   <div
-                    key={`${line.text}_${i}`}
+                    id={`story-line-${i}`}
+                    key={`${line.text}_${i}`}>
+                    <div
 
                     // TODO change a color if we have progressed at the current index (i)
-                    className={cn()}
-                    >{
-                      line.text
-                    }</div>)}
+                    className={cn(
+                      "flex flex-col items-center w-full "
+                      //i < currentLineIndex
+                      //? 'text-yellow-200'
+                      //: 'text-blue-200/80'
+                    )}
+                    style={{}}
+                    >
+                      <div className="w-full md:w-2/3 text-center"> {
+                      line.text.split("").map((c, j, arr) => <span
+                      key={`${c}_${j}`}
+                      className={cn(
+                        `transition-all duration-100 ease-in-out`,
+                        i < currentLineIndex || (isLoaded && i === currentLineIndex && j <= (progress * 1.3 * arr.length))
+                      ? 'text-yellow-400/90'
+                      : ''
+                      )}>{c || " "}</span>)
+                    }</div>
+                    <div className="flex flex-col items-center justify-center w-full p-8">
+                      {images.at(i) ? <img
+                        className="h-[400px] rounded-lg overflow-hidden"
+                        src={images.at(i)}
+                      /> : null}
+                    </div>
+                    </div>
+                  </div>)}
               </div>
             </div>
           </div>

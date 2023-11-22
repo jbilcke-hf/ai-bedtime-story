@@ -1,11 +1,37 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
-export function useAudio() {
+// Helper Types
+type UseAudioResponse = {
+  playback: (base64Data?: string, isLastTrackOfPlaylist?: boolean) => Promise<boolean>;
+  progress: number;
+  isLoaded: boolean;
+  isPlaying: boolean;
+  isSwitchingTracks: boolean; // when audio is temporary cut (but it's not a real pause)
+  togglePause: () => void;
+};
+
+export function useAudio(): UseAudioResponse {
   const audioContextRef = useRef<AudioContext | null>(null);
-
+  const sourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
+  const [progress, setProgress] = useState(0.0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [isLoaded, setIsLoaded] = useState(false);
+  const [isSwitchingTracks, setSwitchingTracks] = useState(false);
+  const startTimeRef = useRef(0);
+  const pauseTimeRef = useRef(0);
+  
   const stopAudio = useCallback(() => {
-    audioContextRef.current?.close();
-    audioContextRef.current = null;
+    try {
+      audioContextRef.current?.close();
+    } catch (err) {
+      // already closed probably
+    }
+    setSwitchingTracks(false);
+
+    sourceNodeRef.current = null;
+    sourceNodeRef.current = null;
+
+    // setProgress(0); // Reset progress
   }, []);
 
   // Helper function to handle conversion from Base64 to an ArrayBuffer
@@ -14,13 +40,13 @@ export function useAudio() {
     return response.arrayBuffer();
   }
 
-  const playAudio = useCallback(
-    async (base64Data?: string) => {
+  const playback = useCallback(
+    async (base64Data?: string, isLastTrackOfPlaylist?: boolean): Promise<boolean> => {
       stopAudio(); // Stop any playing audio first
 
       // If no base64 data provided, we don't attempt to play any audio
       if (!base64Data) {
-        return;
+        return false;
       }
 
       // Initialize AudioContext
@@ -52,13 +78,41 @@ export function useAudio() {
           source.connect(gainNode);
           gainNode.connect(audioContext.destination);
 
-          // Start playback and handle finishing
-          source.start();
+          // Assign source node to ref for progress tracking
+          sourceNodeRef.current = source;
+          source.start(0, pauseTimeRef.current % audioBuffer.duration); // Start at the correct offset if paused previously
+          startTimeRef.current = audioContextRef.current!.currentTime - pauseTimeRef.current;
           
-          source.onended = () => {
-            stopAudio();
-            resolve(true);
-          };
+          setSwitchingTracks(false);
+          setProgress(0);
+          setIsLoaded(true);
+          setIsPlaying(true);
+
+          // Set up progress interval
+          const totalDuration = audioBuffer.duration;
+          const updateProgressInterval = setInterval(() => {
+            if (sourceNodeRef.current && audioContextRef.current) {
+              const currentTime = audioContextRef.current.currentTime;
+              const currentProgress = currentTime / totalDuration;
+              setProgress(currentProgress);
+              if (currentProgress >= 1.0) {
+                clearInterval(updateProgressInterval);
+              }
+            }
+          }, 50); // Update every 50ms
+          
+          if (source) {
+            source.onended = () => {
+              // used to indicate a temporary stop, while we switch tracks
+              if (!isLastTrackOfPlaylist) {
+                setSwitchingTracks(true);
+              }
+              setIsPlaying(false);
+              clearInterval(updateProgressInterval);
+              stopAudio();
+              resolve(true);
+            };
+          }
         }, (error) => {
           console.error('Error decoding audio data:', error);
           reject(error);
@@ -68,6 +122,25 @@ export function useAudio() {
     [stopAudio]
   );
 
+  const togglePause = useCallback(() => {
+    if (!audioContextRef.current || !sourceNodeRef.current) {
+      return; // Do nothing if audio is not initialized
+    }
+
+    if (isPlaying) {
+      // Pause the audio
+      pauseTimeRef.current += audioContextRef.current.currentTime - startTimeRef.current;
+      sourceNodeRef.current.stop(); // This effectively "pauses" the audio, but it also means the sourceNode will be unusable
+      sourceNodeRef.current = null; // As the node is now unusable, we nullify it
+      setIsPlaying(false);
+    } else {
+      // Resume playing
+      audioContextRef.current.resume().then(() => {
+        playback(); // This will pick up where we left off due to pauseTimeRef
+      });
+    }
+  }, [audioContextRef, sourceNodeRef, isPlaying, playback]);
+
   // Effect to handle cleanup on component unmount
   useEffect(() => {
     return () => {
@@ -75,6 +148,5 @@ export function useAudio() {
     };
   }, [stopAudio]);
 
-  // Return the playAudio function from the hook
-  return playAudio;
+  return { playback, isPlaying, isSwitchingTracks, isLoaded, progress, togglePause };
 }
